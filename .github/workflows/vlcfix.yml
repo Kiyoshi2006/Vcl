@@ -1,0 +1,66 @@
+name: Build VLCFix
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: "Link IPA VLC gốc (đã giải mã)"
+        required: false
+        default: "https://github.com/Kiyoshi2006/InfuseSubFinder/releases/download/Noting/VLC-4.0.0.ipa"
+  push:
+    paths:
+      - "VLCFix/**"
+      - ".github/workflows/vlcfix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build VLCFix.dylib
+        working-directory: VLCFix
+        run: |
+          set -e
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=12.0 \
+            -fobjc-arc -O2 -Wall -Wno-deprecated-declarations \
+            -dynamiclib -framework Foundation \
+            -install_name @executable_path/Frameworks/VLCFix.dylib \
+            -o VLCFix.dylib VLCFix.m
+          file VLCFix.dylib
+          otool -L VLCFix.dylib
+
+      - name: Tiêm dylib vào IPA VLC
+        env:
+          IPA_URL: ${{ github.event.inputs.ipa_url || 'https://github.com/Kiyoshi2006/InfuseSubFinder/releases/download/Noting/VLC-4.0.0.ipa' }}
+        run: |
+          set -e
+          curl -fL -o VLC-orig.ipa "$IPA_URL"
+          rm -rf work && mkdir work && cd work
+          unzip -q ../VLC-orig.ipa
+          APP=$(ls -d Payload/*.app | head -n1)
+          EXE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Info.plist")
+          mkdir -p "$APP/Frameworks"
+          cp ../VLCFix/VLCFix.dylib "$APP/Frameworks/VLCFix.dylib"
+          python3 ../VLCFix/inject_dylib.py "$APP/$EXE" "@executable_path/Frameworks/VLCFix.dylib"
+          otool -L "$APP/$EXE" | grep VLCFix
+          zip -qry ../VLC-4.0.0-VLCFix.ipa Payload
+          cd ..
+          ls -la VLC-4.0.0-VLCFix.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VLCFix
+          path: |
+            VLCFix/VLCFix.dylib
+            VLC-4.0.0-VLCFix.ipa
+
+      - name: Đẩy lên release "Noting" (nếu có)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload Noting VLC-4.0.0-VLCFix.ipa VLCFix/VLCFix.dylib --clobber
