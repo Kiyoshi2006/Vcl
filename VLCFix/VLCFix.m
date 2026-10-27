@@ -297,6 +297,9 @@ didReceiveResponse:(NSURLResponse *)response
     }];
     if (ok) {
         self.sent += data.length;
+        if (self.sent == data.length || (self.sent / (8 * 1024 * 1024)) != ((self.sent - data.length) / (8 * 1024 * 1024))) {
+            VFLog(@"%@ progress=%llu bytes", self.tag, self.sent);
+        }
     } else {
         self.clientGone = YES;
         [dataTask cancel];
@@ -619,8 +622,10 @@ static IMP VFHook(Class c, SEL sel, IMP imp) {
     return old;
 }
 
-// -[VLCMedia initWithURL:]
+// Hook cả hai initializer. Một số bản VLCKit tạo media bằng initWithURL:options:
+// thay vì initWithURL:, khiến URL video thật đi vòng qua proxy.
 static id (*orig_initWithURL)(id, SEL, NSURL *);
+static id (*orig_initWithURLOptions)(id, SEL, NSURL *, id);
 static id hook_initWithURL(id self, SEL _cmd, NSURL *url) {
     VFOrigin *o = nil;
     NSURL *use = nil;
@@ -628,6 +633,23 @@ static id hook_initWithURL(id self, SEL _cmd, NSURL *url) {
     id r = orig_initWithURL(self, _cmd, use ?: url);
     if (r && o) objc_setAssociatedObject(r, kOriginKey, @(o.oid), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     VFLog(@"VLCMedia initWithURL: %@ -> %@", VFSafeURL(url), use ? @"proxy" : @"direct (không proxy)");
+    return r;
+}
+
+static void VFCaptureOption(id media, NSString *rawKey, NSString *value);
+
+static id hook_initWithURLOptions(id self, SEL _cmd, NSURL *url, id options) {
+    VFOrigin *o = nil;
+    NSURL *use = nil;
+    @try { use = VFProxify(url, &o); } @catch (__unused NSException *e) { use = nil; o = nil; }
+    id r = orig_initWithURLOptions(self, _cmd, use ?: url, options);
+    if (r && o) objc_setAssociatedObject(r, kOriginKey, @(o.oid), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    VFLog(@"VLCMedia initWithURL:options: %@ -> %@", VFSafeURL(url), use ? @"proxy" : @"direct (không proxy)");
+    if (r && o && [options isKindOfClass:[NSDictionary class]]) {
+        [(NSDictionary *)options enumerateKeysAndObjectsUsingBlock:^(id key, id val, BOOL *stop) {
+            VFCaptureOption(r, [NSString stringWithFormat:@"%@", key], [NSString stringWithFormat:@"%@", val]);
+        }];
+    }
     return r;
 }
 
@@ -719,11 +741,13 @@ static void VFTryInstall(void) {
             Class m = objc_getClass("VLCMedia");
             if (m) {
                 orig_initWithURL = (id (*)(id, SEL, NSURL *))VFHook(m, sel_registerName("initWithURL:"), (IMP)hook_initWithURL);
+                orig_initWithURLOptions = (id (*)(id, SEL, NSURL *, id))VFHook(m, sel_registerName("initWithURL:options:"), (IMP)hook_initWithURLOptions);
                 orig_addOption = (void (*)(id, SEL, NSString *))VFHook(m, sel_registerName("addOption:"), (IMP)hook_addOption);
                 orig_addOptions = (void (*)(id, SEL, id))VFHook(m, sel_registerName("addOptions:"), (IMP)hook_addOptions);
                 gMediaHooked = (orig_initWithURL != NULL);
-                VFLog(@"VLCMedia hooks installed: init=%d addOption=%d addOptions=%d",
-                      orig_initWithURL != NULL, orig_addOption != NULL, orig_addOptions != NULL);
+                VFLog(@"VLCMedia hooks installed: init=%d initOptions=%d addOption=%d addOptions=%d",
+                      orig_initWithURL != NULL, orig_initWithURLOptions != NULL,
+                      orig_addOption != NULL, orig_addOptions != NULL);
             }
         }
         if (!gLibHooked) {
